@@ -1,0 +1,7 @@
+Flask
+gunicorn
+requests
+solana
+networkx
+plotly
+pandas
