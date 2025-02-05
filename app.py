@@ -18,7 +18,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Solana AML Monitor</title>
+    <title>Solana Fund Flow</title>
     <style>
         body { font-family: Arial, sans-serif; text-align: center; padding: 20px; }
         input { width: 300px; padding: 10px; }
@@ -28,7 +28,7 @@ HTML_TEMPLATE = """
     <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
 </head>
 <body>
-    <h1>Solana AML Transaction Monitor</h1>
+    <h1>Solana Transaction Flow Tracker</h1>
     <input type="text" id="walletInput" placeholder="Enter Solana Wallet Address">
     <button onclick="traceWallet()">Analyze</button>
     <h3 id="riskScore"></h3>
@@ -72,7 +72,7 @@ def get_transaction_details(signature):
     return response.json().get("result", {}) if response.status_code == 200 else {}
 
 def extract_transaction_flows(wallet_address, transactions):
-    """Extract outgoing transactions and recipient addresses."""
+    """Extract outgoing transactions, amounts, and recipient addresses."""
     flow_dict = {}
     total_volume = 0
 
@@ -90,60 +90,70 @@ def extract_transaction_flows(wallet_address, transactions):
                 amount = float(parsed.get("lamports", 0)) / 1e9  # Convert lamports to SOL
                 
                 if sender == wallet_address and receiver:
-                    flow_dict[receiver] = flow_dict.get(receiver, 0) + 1
+                    if receiver not in flow_dict:
+                        flow_dict[receiver] = 0
+                    flow_dict[receiver] += amount
                     total_volume += amount
 
     return flow_dict, total_volume
 
-def assign_risk_score(transaction_count, total_volume, counterparty_wallets):
-    """Assign a risk score based on transaction behavior."""
-    score = 0
-    if transaction_count > 50: score += 20  # High frequency
-    if total_volume > 10000: score += 30  # Large volume in SOL
-    if any(wallet in HIGH_RISK_WALLETS for wallet in counterparty_wallets): score += 50  # Known risky wallets
-
-    return "High Risk" if score >= 50 else "Medium Risk" if score >= 30 else "Low Risk"
-
 def generate_network_graph(wallet_address, transaction_flows):
-    """Generate an interactive transaction network graph."""
-    G = nx.Graph()
+    """Generate an interactive transaction flow graph with amounts."""
+    G = nx.DiGraph()  # Directed graph to show fund movement
     G.add_node(wallet_address, size=100, color="blue")
 
-    node_sizes, node_colors, node_labels, edges = [], [], [], []
-    for receiver, count in transaction_flows.items():
-        size = count * 10 + 50
-        color = "green" if count == 1 else "yellow" if count <= 5 else "red"
+    edge_labels = {}
+    node_sizes = []
+    node_colors = []
+    node_labels = []
+    edge_x = []
+    edge_y = []
+
+    for receiver, amount in transaction_flows.items():
+        size = amount * 5 + 50  # Scale node size by SOL received
+        color = "green" if amount < 10 else "yellow" if amount < 50 else "red"
 
         G.add_node(receiver, size=size, color=color)
         G.add_edge(wallet_address, receiver)
-
-        node_sizes.append(size)
-        node_colors.append(color)
-        node_labels.append(f"{receiver[:6]}...{receiver[-4:]} ({count})")
+        edge_labels[(wallet_address, receiver)] = f"{amount:.2f} SOL"
 
     pos = nx.spring_layout(G, seed=42)
-    edge_x, edge_y = [], []
+
+    # Create edges with labels
     for edge in G.edges():
         x0, y0 = pos[edge[0]]
         x1, y1 = pos[edge[1]]
         edge_x.extend([x0, x1, None])
         edge_y.extend([y0, y1, None])
 
-    edge_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=1, color='black'), hoverinfo='none', mode='lines')
+    edge_trace = go.Scatter(
+        x=edge_x, y=edge_y,
+        line=dict(width=1.5, color='black'),
+        hoverinfo='none',
+        mode='lines+text',
+        text=[edge_labels[edge] for edge in G.edges()],
+        textposition="middle right"
+    )
+
     node_x, node_y, node_text, node_color, node_size = [], [], [], [], []
     for node in G.nodes():
         x, y = pos[node]
         node_x.append(x)
         node_y.append(y)
-        node_text.append(node if node == wallet_address else node_labels.pop(0))
+        node_text.append(node if node == wallet_address else f"{node[:6]}...{node[-4:]} ({transaction_flows.get(node, 0):.2f} SOL)")
         node_color.append(G.nodes[node]["color"])
         node_size.append(G.nodes[node]["size"])
 
-    node_trace = go.Scatter(x=node_x, y=node_y, mode='markers', hoverinfo='text',
-                            marker=dict(size=node_size, color=node_color, line=dict(width=2, color='black')),
-                            text=node_text)
+    node_trace = go.Scatter(
+        x=node_x, y=node_y,
+        mode='markers',
+        hoverinfo='text',
+        marker=dict(size=node_size, color=node_color, line=dict(width=2, color='black')),
+        text=node_text
+    )
 
-    return go.Figure(data=[edge_trace, node_trace]).to_json()
+    fig = go.Figure(data=[edge_trace, node_trace])
+    return fig.to_json()
 
 @app.route("/")
 def index():
@@ -156,9 +166,8 @@ def trace_wallet():
     transactions = get_wallet_transactions(wallet_address, limit=10)
     if not transactions: return jsonify({"error": "No transactions found"}), 404
     transaction_flows, total_volume = extract_transaction_flows(wallet_address, transactions)
-    risk_score = assign_risk_score(len(transaction_flows), total_volume, transaction_flows.keys())
     graph_json = generate_network_graph(wallet_address, transaction_flows)
-    return jsonify({"graph": graph_json, "risk_score": risk_score})
+    return jsonify({"graph": graph_json, "risk_score": f"Total Volume: {total_volume:.2f} SOL"})
 
 if __name__ == "__main__":
     app.run(debug=True)
